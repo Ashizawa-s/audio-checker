@@ -1,26 +1,48 @@
 import os
 import time
 import uuid
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import secrets
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from google import genai
 import uvicorn
 
 # --- API キー ---
-# APIキーは環境変数 "GEMINI_API_KEY" から読み込みます
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 app = FastAPI()
+security = HTTPBasic()
+
+# --- Basic認証の設定（必要に応じてIDとパスワードを変更してください） ---
+# デフォルトID: admin / パスワード: password123
+USERNAME = os.environ.get("AUTH_USER", "admin")
+PASSWORD = os.environ.get("AUTH_PASS", "password123")
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, USERNAME)
+    correct_password = secrets.compare_digest(credentials.password, PASSWORD)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=401,
+            detail="認証に失敗しました",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 @app.get("/", response_class=HTMLResponse)
-async def read_index():
+async def read_index(username: str = Depends(verify_credentials)):
     if os.path.exists("index.html"):
         with open("index.html", "r", encoding="utf-8") as f:
             return f.read()
     return "<h1>index.html が見つかりません</h1>"
 
 @app.post("/analyze")
-async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
+async def analyze_audio(
+    file: UploadFile = File(...), 
+    prompt: str = Form(...),
+    username: str = Depends(verify_credentials)
+):
     ext = os.path.splitext(file.filename)[1]
     if not ext:
         ext = ".mp3"
@@ -55,7 +77,6 @@ async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
         if not available_models:
             available_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
 
-        # 文字起こしを防止し、評価出力を強制するシステムプロンプト
         system_instruction = (
             "あなたはプロのコンプライアンス音声監査員です。\n"
             "【最重要指示】音声の全文文字起こし（ベタ貼り）だけを出力することは絶対に禁止します。\n"
@@ -100,6 +121,5 @@ async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
             os.remove(temp_path)
         raise HTTPException(status_code=500, detail=str(e))
 
-# WEB版として公開するために必須のサーバー起動設定
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
