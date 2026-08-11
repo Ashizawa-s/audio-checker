@@ -1,4 +1,4 @@
 fastapi
 uvicorn
+google-generativeai
 python-multipart
-google-genai
