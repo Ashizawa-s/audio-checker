@@ -4,9 +4,10 @@ import uuid
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse
 from google import genai
+import uvicorn
 
 # --- API キー ---
-# APIキーはコードに書かず、環境変数 "GEMINI_API_KEY" から読み込みます
+# APIキーは環境変数 "GEMINI_API_KEY" から読み込みます
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 app = FastAPI()
@@ -54,7 +55,7 @@ async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
         if not available_models:
             available_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
 
-        # 文字起こしを防止し、評価出力を強制するシステムプロンプトを追加
+        # 文字起こしを防止し、評価出力を強制するシステムプロンプト
         system_instruction = (
             "あなたはプロのコンプライアンス音声監査員です。\n"
             "【最重要指示】音声の全文文字起こし（ベタ貼り）だけを出力することは絶対に禁止します。\n"
@@ -64,7 +65,6 @@ async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
         last_error = None
         response_text = None
 
-        # 順次モデルを試行して解析実行
         for model_name in available_models:
             try:
                 response = client.models.generate_content(
@@ -99,3 +99,7 @@ async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
         if os.path.exists(temp_path):
             os.remove(temp_path)
         raise HTTPException(status_code=500, detail=str(e))
+
+# WEB版として公開するために必須のサーバー起動設定
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
