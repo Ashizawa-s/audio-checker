@@ -1,0 +1,101 @@
+import os
+import time
+import uuid
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse
+from google import genai
+
+# --- API キー ---
+# APIキーはコードに書かず、環境変数 "GEMINI_API_KEY" から読み込みます
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+app = FastAPI()
+
+@app.get("/", response_class=HTMLResponse)
+async def read_index():
+    if os.path.exists("index.html"):
+        with open("index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    return "<h1>index.html が見つかりません</h1>"
+
+@app.post("/analyze")
+async def analyze_audio(file: UploadFile = File(...), prompt: str = Form(...)):
+    ext = os.path.splitext(file.filename)[1]
+    if not ext:
+        ext = ".mp3"
+    temp_path = f"temp_{uuid.uuid4().hex}{ext}"
+
+    try:
+        contents = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        
+        # 音声ファイルをアップロード
+        audio_file = client.files.upload(file=temp_path)
+        
+        # 処理完了まで待機
+        while audio_file.state.name == "PROCESSING":
+            time.sleep(2)
+            audio_file = client.files.get(name=audio_file.name)
+            
+        if audio_file.state.name == "FAILED":
+            raise HTTPException(status_code=500, detail="音声ファイルの処理に失敗しました。")
+
+        # 利用可能モデルの自動取得
+        available_models = []
+        try:
+            for m in client.models.list():
+                model_id = m.name.replace("models/", "")
+                if "flash" in model_id or "pro" in model_id:
+                    available_models.append(model_id)
+        except Exception:
+            pass
+
+        if not available_models:
+            available_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+
+        # 文字起こしを防止し、評価出力を強制するシステムプロンプトを追加
+        system_instruction = (
+            "あなたはプロのコンプライアンス音声監査員です。\n"
+            "【最重要指示】音声の全文文字起こし（ベタ貼り）だけを出力することは絶対に禁止します。\n"
+            "必ず与えられたプロンプト（監査指示・チェック項目）に従い、音声内容を分析した「総合判定」「スコア」「項目別のOK/NG判定およびタイムスタンプ付き根拠」のみを出力してください。"
+        )
+
+        last_error = None
+        response_text = None
+
+        # 順次モデルを試行して解析実行
+        for model_name in available_models:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[audio_file, prompt],
+                    config={"system_instruction": system_instruction}
+                )
+                response_text = response.text
+                break
+            except Exception as e:
+                last_error = e
+                continue
+
+        # 後始末
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
+            
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        if response_text is not None:
+            return {"result": response_text}
+        else:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"利用可能なモデルでの解析に失敗しました。詳細: {last_error}"
+            )
+
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise HTTPException(status_code=500, detail=str(e))

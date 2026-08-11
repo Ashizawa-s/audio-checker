@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>音声コンプライアンス解析</title>
+
+  <!-- PDF・Word読み取り用外部ライブラリ -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
+
+  <style>
+    body { font-family: sans-serif; max-width: 850px; margin: 40px auto; padding: 20px; background: #f4f6f8; }
+    .card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    label { display: block; font-weight: bold; margin-top: 15px; }
+    select, textarea, input, button { width: 100%; padding: 10px; margin-top: 8px; box-sizing: border-box; }
+    select { font-size: 15px; border: 1px solid #cbd5e0; border-radius: 4px; background: #fff; }
+    textarea { height: 220px; font-family: monospace; line-height: 1.4; }
+    button { background: #2b6cb0; color: white; border: none; font-weight: bold; cursor: pointer; margin-top: 15px; font-size: 15px; border-radius: 4px; }
+    button:hover { background: #2c5282; }
+    .btn-danger { background: #e53e3e; }
+    .btn-danger:hover { background: #c53030; }
+    .btn-secondary { background: #4a5568; }
+    .btn-secondary:hover { background: #2d3748; }
+    .row { display: flex; gap: 10px; }
+    .row > * { flex: 1; }
+    
+    .drop-zone {
+      border: 2px dashed #cbd5e0;
+      border-radius: 6px;
+      padding: 20px;
+      text-align: center;
+      background: #fafafa;
+      color: #718096;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .drop-zone.dragover {
+      background: #ebf8ff;
+      border-color: #3182ce;
+      color: #2b6cb0;
+    }
+
+    #resultArea { display: none; margin-top: 25px; padding: 15px; background: #fff; border: 1px solid #cbd5e0; border-radius: 6px; white-space: pre-wrap; line-height: 1.6; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>音声コンプライアンス監査</h2>
+
+    <label>トークスクリプト選択</label>
+    <div class="row">
+      <select id="scriptSelect" onchange="switchScript()"></select>
+      <button class="btn-danger" style="width: 120px; margin-top: 8px;" onclick="deleteCurrentScript()">削除</button>
+    </div>
+
+    <label>解析指示（プロンプト）</label>
+    <textarea id="promptInput"></textarea>
+
+    <label>音声ファイル（長尺音声対応）</label>
+    <input type="file" id="audioFile" accept="audio/*">
+
+    <button onclick="runAnalysis()">解析実行</button>
+    <p id="loading" style="display:none; color: orange; font-weight: bold; margin-top: 15px;">解析中です。長尺音声の場合は数分かかる場合があります...</p>
+
+    <div id="resultArea"></div>
+  </div>
+
+  <div class="card">
+    <h3>新規スクリプトの登録・保存</h3>
+    
+    <label>ドキュメントファイルから読み込み (Word / PDF)</label>
+    <div id="dropZone" class="drop-zone" onclick="document.getElementById('docFileInput').click()">
+      ここに Word (.docx) または PDF ファイルをドロップ（自動で評価形式プロンプトへ変換されます）
+    </div>
+    <input type="file" id="docFileInput" accept=".pdf, .docx, .doc, .txt" style="display:none;" onchange="handleFileSelect(this.files)">
+
+    <label>スクリプト名</label>
+    <input type="text" id="newTitle" placeholder="タイトルを入力（例: まとめて光 監査）">
+
+    <label>生成された評価用プロンプト内容</label>
+    <textarea id="newPrompt" placeholder="ファイルをドロップすると、詳細評価用プロンプトが自動生成されます"></textarea>
+
+    <button class="btn-secondary" onclick="saveNewScript()">この内容でスクリプトを保存</button>
+  </div>
+
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    // デフォルトの評価用スクリプト（例）
+    const defaultScripts = {
+      "光回線 代理店営業": `あなたは光回線代理店営業のコンプライアンス監査員です。
+提供された音声データを精査し、以下の【指定チェック項目】に基づいて厳格に判定してください。
+
+【指定チェック項目】
+1. 新規切替・既存回線の強制変更ではない旨の案内・確認
+2. 契約者名・生年月日・設置先住所の確認
+3. 現在の利用回線および利用環境の確認
+4. サービス提供元名称・ベストエフォートの説明
+5. 選択プランの月額料金および初期費用の説明
+6. 契約期間・解約金に関する説明
+7. 工事費用および実質無料等の特典条件説明
+8. キャンペーン適用条件・申請手続きの説明
+9. 8日以内の初期契約解除制度の説明
+
+【評価・出力ルール】
+・【基礎スコア】は「OK件数 ÷ 総項目数 × 100」で計算してください。
+・顧客の回答が非常に聞き取りづらい、ボソボソと話している、または応答が不自然に途切れている箇所があれば【返答品質減点】として理由とタイムスタンプを記載してください。
+・全体の評価として【総合判定】（合格/不合格）、【AIスコア】を算出して提示してください。
+
+【出力形式】
+【総合判定】合格 / 不合格
+【AIスコア】〇〇点
+【基礎スコア】〇〇点
+【返答品質減点】〇点（理由）
+【総評】〇項目の判定結果（OK 〇件／NG 〇件／要確認 〇件）
+【OK件数】〇/〇
+【NG項目】項目名（無ければ「なし」）
+【要確認項目】項目名（無ければ「なし」）
+
+【項目詳細】
+1. OK/NG/要確認/非該当｜項目名
+理由：具体的に案内・確認ができていたか否かの判定理由
+根拠：[00:00-00:00] 実際の会話の文字起こし`
+    };
+
+    function getStoredScripts() {
+      const stored = localStorage.getItem('compliance_scripts');
+      return stored ? JSON.parse(stored) : { ...defaultScripts };
+    }
+
+    function saveStoredScripts(scripts) {
+      localStorage.setItem('compliance_scripts', JSON.stringify(scripts));
+    }
+
+    function renderDropdown(selectedName = null) {
+      const scripts = getStoredScripts();
+      const select = document.getElementById('scriptSelect');
+      select.innerHTML = '';
+
+      Object.keys(scripts).forEach(name => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
+
+      if (selectedName && scripts[selectedName]) {
+        select.value = selectedName;
+      }
+      switchScript();
+    }
+
+    function switchScript() {
+      const scripts = getStoredScripts();
+      const selectedName = document.getElementById('scriptSelect').value;
+      document.getElementById('promptInput').value = scripts[selectedName] || '';
+    }
+
+    function saveNewScript() {
+      const title = document.getElementById('newTitle').value.trim();
+      const prompt = document.getElementById('newPrompt').value.trim();
+
+      if (!title || !prompt) {
+        return alert('スクリプト名とプロンプト内容の両方を入力してください。');
+      }
+
+      const scripts = getStoredScripts();
+      scripts[title] = prompt;
+      saveStoredScripts(scripts);
+
+      document.getElementById('newTitle').value = '';
+      document.getElementById('newPrompt').value = '';
+      renderDropdown(title);
+      alert(`「${title}」を保存しました。`);
+    }
+
+    function deleteCurrentScript() {
+      const select = document.getElementById('scriptSelect');
+      const selectedName = select.value;
+      if (!selectedName) return;
+
+      if (confirm(`「${selectedName}」を削除してもよろしいですか？`)) {
+        const scripts = getStoredScripts();
+        delete scripts[selectedName];
+        saveStoredScripts(scripts);
+        renderDropdown();
+      }
+    }
+
+    // --- ドロップされたドキュメントを評価フォーマットに自動整形 ---
+    const dropZone = document.getElementById('dropZone');
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('dragover');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files.length > 0) {
+        handleFileSelect(e.dataTransfer.files);
+      }
+    });
+
+    function buildEvaluationPrompt(rawText) {
+      return `あなたはプロのコンプライアンス監査員です。
+提供された音声データを精査し、以下の【指定マニュアル・チェックリスト】に基づいて項目ごとの判定・タイムスタンプ・根拠・スコアリングを行ってください。
+
+【指定マニュアル・チェックリスト】
+---
+${rawText}
+---
+
+【評価および出力手順】
+1. 音声から【指定マニュアル・チェックリスト】内の全チェック項目を抽出し、番号順に評価してください。
+2. 対象外の項目（例：固定電話なしの場合の電話料金説明など）がある場合は、「非該当」としてOK扱いまたは除外判断を行ってください。
+3. 会話のやり取りから顧客の低トーン返答（極端に小さい音量・聞き取りづらい短答など）や無回答があれば【返答品質減点】（1件あたり-5点等）を算出して記載してください。
+4. 【基礎スコア】は「(OK項目数 ÷ 対象項目数) × 100」で計算し、減点を引いた最終的な【AIスコア】および【総合判定】（合格/不合格）を出力してください。
+
+【出力形式】（※以下のフォーマットに厳密に従って出力してください）
+【総合判定】合格 または 不合格
+【AIスコア】〇〇点
+【基礎スコア】〇〇点
+【返答品質減点】〇点（内訳を記載）
+【総評】〇項目の判定結果（OK 〇件／NG 〇件／要確認 〇件）
+【OK件数】〇/〇
+【NG項目】項目〇（なければ「なし」）
+【要確認項目】項目〇（なければ「なし」）
+
+【項目詳細】
+1. OK (または NG / 要確認 / 非該当)｜項目内容
+理由：判定理由の説明
+根拠：[分:秒-分:秒] 該当する発言の文字起こし
+
+2. OK (または NG / 要確認 / 非該当)｜項目内容
+理由：...
+根拠：...
+（※マニュアルから抽出した全項目について同様に出力）`;
+    }
+
+    async function handleFileSelect(files) {
+      const file = files[0];
+      if (!file) return;
+
+      const fileNameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+      document.getElementById('newTitle').value = fileNameWithoutExt;
+
+      const ext = file.name.split('.').pop().toLowerCase();
+      let extractedText = '';
+
+      try {
+        if (ext === 'docx') {
+          const arrayBuffer = await file.arrayBuffer();
+          const result = await mammoth.extractRawText({ arrayBuffer: arrayBuffer });
+          extractedText = result.value.trim();
+        } else if (ext === 'pdf') {
+          const arrayBuffer = await file.arrayBuffer();
+          const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+          let fullText = '';
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += pageText + '\n';
+          }
+          extractedText = fullText.trim();
+        } else if (ext === 'txt') {
+          extractedText = (await file.text()).trim();
+        } else {
+          return alert('.docx, .pdf, .txt 形式のファイルを選択してください。');
+        }
+
+        // 抽出テキストをスコア・タイムスタンプ評価形式に自動整形
+        document.getElementById('newPrompt').value = buildEvaluationPrompt(extractedText);
+
+      } catch (err) {
+        alert('ファイルの読み込みに失敗しました: ' + err.message);
+      }
+    }
+
+    window.onload = function() {
+      renderDropdown();
+    };
+
+    async function runAnalysis() {
+      const file = document.getElementById('audioFile').files[0];
+      const prompt = document.getElementById('promptInput').value;
+
+      if (!file) return alert('音声ファイルを選択してください');
+
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('prompt', prompt);
+
+      document.getElementById('loading').style.display = 'block';
+      document.getElementById('resultArea').style.display = 'none';
+
+      try {
+        const res = await fetch('/analyze', { method: 'POST', body: fd });
+        const data = await res.json();
+        
+        if (!res.ok) throw new Error(data.detail || 'エラーが発生しました');
+
+        document.getElementById('resultArea').innerText = data.result;
+        document.getElementById('resultArea').style.display = 'block';
+      } catch(e) {
+        alert('エラー: ' + e.message);
+      } finally {
+        document.getElementById('loading').style.display = 'none';
+      }
+    }
+  </script>
+</body>
+</html>
