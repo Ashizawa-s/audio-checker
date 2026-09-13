@@ -65,7 +65,7 @@ async def analyze_audio(
             raise HTTPException(status_code=500, detail="音声ファイルの処理に失敗しました。")
 
         # 安定動作する音声対応モデルを固定で順番にフォールバック試行
-       available_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+        available_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
         system_instruction = (
             "あなたはプロのコンプライアンス音声監査員です。\n"
