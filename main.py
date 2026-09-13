@@ -64,18 +64,8 @@ async def analyze_audio(
         if audio_file.state.name == "FAILED":
             raise HTTPException(status_code=500, detail="音声ファイルの処理に失敗しました。")
 
-        # 利用可能モデルの自動取得
-        available_models = []
-        try:
-            for m in client.models.list():
-                model_id = m.name.replace("models/", "")
-                if "flash" in model_id or "pro" in model_id:
-                    available_models.append(model_id)
-        except Exception:
-            pass
-
-        if not available_models:
-            available_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+        # 安定動作する音声対応モデルを固定で順番にフォールバック試行
+        available_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
 
         system_instruction = (
             "あなたはプロのコンプライアンス音声監査員です。\n"
