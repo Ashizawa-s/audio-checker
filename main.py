@@ -8,14 +8,11 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from google import genai
 import uvicorn
 
-# --- API キー ---
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 app = FastAPI()
 security = HTTPBasic()
 
-# --- Basic認証の設定（必要に応じてIDとパスワードを変更してください） ---
-# デフォルトID: admin / パスワード: password123
 USERNAME = os.environ.get("AUTH_USER", "admin")
 PASSWORD = os.environ.get("AUTH_PASS", "password123")
 
@@ -53,10 +50,8 @@ async def analyze_audio(
         with open(temp_path, "wb") as f:
             f.write(contents)
         
-        # 音声ファイルをアップロード
         audio_file = client.files.upload(file=temp_path)
         
-        # 処理完了まで待機
         while audio_file.state.name == "PROCESSING":
             time.sleep(2)
             audio_file = client.files.get(name=audio_file.name)
@@ -64,15 +59,14 @@ async def analyze_audio(
         if audio_file.state.name == "FAILED":
             raise HTTPException(status_code=500, detail="音声ファイルの処理に失敗しました。")
 
-        # 安定動作する音声対応モデルを固定で順番にフォールバック試行
-        available_models = ["gemini-3.6-flash"]
+        available_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
 
         system_instruction = (
             "あなたはプロのコンプライアンス音声監査員です。\n"
             "【最重要指示】音声の全文文字起こし（ベタ貼り）だけを出力することは絶対に禁止します。\n"
             "必ず与えられたプロンプト（監査指示・チェック項目）に従い、音声内容を分析した「総合判定」「スコア」「項目別のOK/NG判定およびタイムスタンプ付き根拠」のみを出力してください。\n\n"
             "【判定上の注意点】\n"
-            "* お客様の単なる「言い淀み（どもり）」や|「言葉につまづいた状態」だけでマイナス評価にしないでください。\n"
+            "* お客様の単なる「言い淀み（どもり）」や「言葉につまづいた状態」だけでマイナス評価にしないでください。\n"
             "* ただし、オペレーター側の高圧的なトーン、強い口調、または話を遮るような話し方の直後に、お客様のトーンが萎縮したり焦ったりした場合は、「オペレーターの応対に起因する顧客の動揺」として厳しく減点・指摘してください。\n"
             "* 単なる言い間違いや迷いと、プレッシャーによる焦りは明確に区別して判定してください。"
         )
@@ -93,7 +87,6 @@ async def analyze_audio(
                 last_error = e
                 continue
 
-        # 後始末
         try:
             client.files.delete(name=audio_file.name)
         except Exception:
