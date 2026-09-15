@@ -64,7 +64,7 @@ async def analyze_audio(
             "【最重要指示】音声の全文文字起こし（ベタ貼り）だけを出力することは絶対に禁止します。\n"
             "必ず与えられたプロンプト（監査指示・チェック項目）に従い、音声内容を分析した「総合判定」「スコア」「項目別のOK/NG判定およびタイムスタンプ付き根拠」のみを出力してください。\n\n"
             "【判定上の注意点】\n"
-            "* お客様の単なる「言い淀み（どもり）」や「言葉につまづいた状態」だけでマイナス評価にしないでください。\n"
+            "* お客様の単なる「言い淀み（どもり）」やK「言葉につまづいた状態」だけでマイナス評価にしないでください。\n"
             "* ただし、オペレーター側の高圧的なトーン、強い口調、または話を遮るような話し方の直後に、お客様のトーンが萎縮したり焦ったりした場合は、「オペレーターの応対に起因する顧客の動揺」として厳しく減点・指摘してください。\n"
             "* 単なる言い間違いや迷いと、プレッシャーによる焦りは明確に区別して判定してください。"
         )
@@ -80,22 +80,34 @@ async def analyze_audio(
                 if "flash" in model_name.lower() and "generateContent" in methods:
                     target_models.append(model_name)
 
-            # エラーメッセージの指示通り、最新の 3.6-flash を保険に設定
             if not target_models:
                 target_models = ["gemini-3.6-flash"]
 
+            # 混雑時（503など）に自動で数回リトライする仕組み
+            max_retries = 3
             for model_name in target_models:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=[audio_file, prompt],
-                        config={"system_instruction": system_instruction}
-                    )
-                    response_text = response.text
+                success = False
+                for attempt in range(max_retries):
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=[audio_file, prompt],
+                            config={"system_instruction": system_instruction}
+                        )
+                        response_text = response.text
+                        success = True
+                        break
+                    except Exception as e:
+                        last_error = e
+                        # 混雑エラーなどの場合は数秒待って再試行
+                        if "503" in str(e) or " UNAVAILABLE" in str(e):
+                            time.sleep(3 * (attempt + 1))
+                            continue
+                        else:
+                            # 503以外のエラーなら次のモデルへ
+                            break
+                if success:
                     break
-                except Exception as e:
-                    last_error = e
-                    continue
         except Exception as e:
             last_error = e
 
@@ -112,7 +124,7 @@ async def analyze_audio(
         else:
             raise HTTPException(
                 status_code=500, 
-                detail=f"利用可能なモデルでの解析に失敗しました。詳細: {last_error}"
+                detail=f"利用可能なモデルでの解析に失敗しました（混雑の可能性があります）。詳細: {last_error}"
             )
 
     except Exception as e:
