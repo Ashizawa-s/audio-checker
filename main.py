@@ -50,11 +50,9 @@ async def analyze_audio(
         with open(temp_path, "wb") as f:
             f.write(contents)
         
-        # 音声ファイルのアップロード
         audio_file = client.files.upload(file=temp_path)
         
-        # 処理待ち（タイムアウト防止のため少し長めにチェック）
-        max_wait = 30
+        max_wait = 40
         waited = 0
         while audio_file.state.name == "PROCESSING":
             if waited > max_wait:
@@ -79,25 +77,43 @@ async def analyze_audio(
         response_text = None
         last_error = None
 
-        # 安定稼働するモデルを指定
-        model_name = "gemini-2.5-flash"
+        try:
+            target_models = []
+            # APIから利用可能なモデルを動的取得
+            for m in client.models.list():
+                model_name = getattr(m, "name", "")
+                methods = getattr(m, "supported_generation_methods", [])
+                if "flash" in model_name.lower() and "generateContent" in methods:
+                    target_models.append(model_name)
 
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[audio_file, prompt],
-                    config={"system_instruction": system_instruction}
-                )
-                response_text = response.text
-                break
-            except Exception as e:
-                last_error = e
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(4)
-                    continue
-                else:
+            # 動的取得できなかった場合の保険は現在の最新モデルのみ
+            if not target_models:
+                target_models = ["gemini-3.6-flash"]
+
+            # 順番に試行（混雑時はリトライ）
+            for model_name in target_models:
+                success = False
+                for attempt in range(2):
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=[audio_file, prompt],
+                            config={"system_instruction": system_instruction}
+                        )
+                        response_text = response.text
+                        success = True
+                        break
+                    except Exception as e:
+                        last_error = e
+                        if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            time.sleep(3)
+                            continue
+                        else:
+                            break
+                if success:
                     break
+        except Exception as e:
+            last_error = e
 
         try:
             client.files.delete(name=audio_file.name)
@@ -112,7 +128,7 @@ async def analyze_audio(
         else:
             raise HTTPException(
                 status_code=500, 
-                detail=f"解析に失敗しました（混雑の可能性があります）。詳細: {last_error}"
+                detail=f"解析に失敗しました。詳細: {last_error}"
             )
 
     except Exception as e:
