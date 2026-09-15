@@ -72,20 +72,19 @@ async def analyze_audio(
         response_text = None
         last_error = None
 
-        # --- モデルを自動で動的取得して試行するロジック ---
+        # --- 古いモデル名を一切排除した完全自動取得ロジック ---
         try:
             target_models = []
-            # APIから利用可能なモデル一覧を取得し、コンテンツ生成に対応したFlash系モデルを探す
+            # 利用可能なモデルから generateContent が使えて "flash" を含むものを動的収集
             for m in client.models.list():
-                if "flash" in m.name.lower() and "generateContent" in getattr(m, "supported_generation_methods", []):
-                    target_models.append(m.name)
-            
-            # 万が一うまくリストが取れなかった場合のフォールバック
+                model_name = getattr(m, "name", "")
+                methods = getattr(m, "supported_generation_methods", [])
+                if "flash" in model_name.lower() and "generateContent" in methods:
+                    target_models.append(model_name)
+
+            # 万が一リストが空だった場合の最低限の保険（常に最新を想定）
             if not target_models:
-                target_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
-            else:
-                # 優先的に使いたいモデル順に並び替えたり、重複を避ける処理など
-                pass
+                target_models = ["gemini-2.0-flash"]
 
             for model_name in target_models:
                 try:
