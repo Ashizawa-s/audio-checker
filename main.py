@@ -72,19 +72,17 @@ async def analyze_audio(
         response_text = None
         last_error = None
 
-        # --- 古いモデル名を一切排除した完全自動取得ロジック ---
         try:
             target_models = []
-            # 利用可能なモデルから generateContent が使えて "flash" を含むものを動的収集
             for m in client.models.list():
                 model_name = getattr(m, "name", "")
                 methods = getattr(m, "supported_generation_methods", [])
                 if "flash" in model_name.lower() and "generateContent" in methods:
                     target_models.append(model_name)
 
-            # 万が一リストが空だった場合の最低限の保険（常に最新を想定）
+            # エラーメッセージの指示通り、最新の 3.6-flash を保険に設定
             if not target_models:
-                target_models = ["gemini-2.0-flash"]
+                target_models = ["gemini-3.6-flash"]
 
             for model_name in target_models:
                 try:
