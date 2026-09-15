@@ -59,8 +59,6 @@ async def analyze_audio(
         if audio_file.state.name == "FAILED":
             raise HTTPException(status_code=500, detail="音声ファイルの処理に失敗しました。")
 
-        available_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
-
         system_instruction = (
             "あなたはプロのコンプライアンス音声監査員です。\n"
             "【最重要指示】音声の全文文字起こし（ベタ貼り）だけを出力することは絶対に禁止します。\n"
@@ -71,21 +69,38 @@ async def analyze_audio(
             "* 単なる言い間違いや迷いと、プレッシャーによる焦りは明確に区別して判定してください。"
         )
 
-        last_error = None
         response_text = None
+        last_error = None
 
-        for model_name in available_models:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[audio_file, prompt],
-                    config={"system_instruction": system_instruction}
-                )
-                response_text = response.text
-                break
-            except Exception as e:
-                last_error = e
-                continue
+        # --- モデルを自動で動的取得して試行するロジック ---
+        try:
+            target_models = []
+            # APIから利用可能なモデル一覧を取得し、コンテンツ生成に対応したFlash系モデルを探す
+            for m in client.models.list():
+                if "flash" in m.name.lower() and "generateContent" in getattr(m, "supported_generation_methods", []):
+                    target_models.append(m.name)
+            
+            # 万が一うまくリストが取れなかった場合のフォールバック
+            if not target_models:
+                target_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+            else:
+                # 優先的に使いたいモデル順に並び替えたり、重複を避ける処理など
+                pass
+
+            for model_name in target_models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[audio_file, prompt],
+                        config={"system_instruction": system_instruction}
+                    )
+                    response_text = response.text
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
+        except Exception as e:
+            last_error = e
 
         try:
             client.files.delete(name=audio_file.name)
