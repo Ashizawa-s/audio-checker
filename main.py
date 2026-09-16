@@ -88,16 +88,12 @@ async def analyze_audio(
 
             # 動的取得できなかった場合の保険は現在の最新モデルのみ
             if not target_models:
-                target_models = [
-                    "gemini-3.6-flash",
-                    "gemini-2.5-flash",
-                    "gemini-2.5-flash-lite",
-                ]
+                target_models = ["gemini-3.6-flash"]
 
             # 順番に試行（混雑時はリトライ）
             for model_name in target_models:
                 success = False
-                for attempt in range(6):
+                for attempt in range(2):
                     try:
                         response = client.models.generate_content(
                             model=model_name,
@@ -109,13 +105,11 @@ async def analyze_audio(
                         break
                     except Exception as e:
                         last_error = e
-                        error_text = str(e).upper()
-                        if any(x in error_text for x in ("503","UNAVAILABLE","HIGH DEMAND","RESOURCE_EXHAUSTED")):
-                            wait = min(2 ** attempt, 20)
-                            print(f"[Retry {attempt+1}/6] {model_name} busy, retry in {wait}s")
-                            time.sleep(wait)
+                        if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            time.sleep(3)
                             continue
-                        break
+                        else:
+                            break
                 if success:
                     break
         except Exception as e:
