@@ -87,16 +87,13 @@ async def analyze_audio(
                     target_models.append(model_name)
 
             # 動的取得できなかった場合の保険は現在の最新モデルのみ
-if not target_models:
-    target_models = [
-        "gemini-3.6-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-    ]
+            if not target_models:
+                target_models = ["gemini-3.6-flash"]
+
             # 順番に試行（混雑時はリトライ）
             for model_name in target_models:
                 success = False
-                for attempt in range(6):
+                for attempt in range(2):
                     try:
                         response = client.models.generate_content(
                             model=model_name,
@@ -106,27 +103,15 @@ if not target_models:
                         response_text = response.text
                         success = True
                         break
-                except Exception as e:
-                    last_error = e
-                    error_text = str(e).upper()
-
-                    if (
-                        "503" in error_text
-                        or "UNAVAILABLE" in error_text
-                        or "HIGH DEMAND" in error_text
-                        or "RESOURCE_EXHAUSTED" in error_text
-                    ):
-                        wait = min(2 ** attempt, 20)
-
-                        print(f"[Retry {attempt+1}/6] {model_name} 混雑中 {wait}秒後に再試行")
-
-                        time.sleep(wait)
-                        continue
-
-                break
-
-            if success:
-                break
+                    except Exception as e:
+                        last_error = e
+                        if "503" in str(e) or "UNAVAILABLE" in str(e):
+                            time.sleep(3)
+                            continue
+                        else:
+                            break
+                if success:
+                    break
         except Exception as e:
             last_error = e
 
@@ -141,23 +126,11 @@ if not target_models:
         if response_text is not None:
             return {"result": response_text}
         else:
-            if last_error:
-    error = str(last_error)
+            raise HTTPException(
+                status_code=500, 
+                detail=f"解析に失敗しました。詳細: {last_error}"
+            )
 
-    if (
-        "503" in error
-        or "UNAVAILABLE" in error
-        or "HIGH DEMAND" in error.upper()
-    ):
-        raise HTTPException(
-            status_code=503,
-            detail="Geminiサーバーが混雑しています。30秒ほど待ってからもう一度お試しください。"
-        )
-
-raise HTTPException(
-    status_code=500,
-    detail=f"解析に失敗しました。詳細: {last_error}"
-)
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
