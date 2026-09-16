@@ -87,13 +87,12 @@ async def analyze_audio(
                     target_models.append(model_name)
 
             # 動的取得できなかった場合の保険は現在の最新モデルのみ
-            if not target_models:
+if not target_models:
     target_models = [
         "gemini-3.6-flash",
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
     ]
-
             # 順番に試行（混雑時はリトライ）
             for model_name in target_models:
                 success = False
