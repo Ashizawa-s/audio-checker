@@ -110,12 +110,7 @@ async def analyze_audio(
                     except Exception as e:
                         last_error = e
                         error_text = str(e).upper()
-                        if (
-                            "503" in error_text
-                            or "UNAVAILABLE" in error_text
-                            or "HIGH DEMAND" in error_text
-                            or "RESOURCE_EXHAUSTED" in error_text
-                        ):
+                        if any(x in error_text for x in ("503","UNAVAILABLE","HIGH DEMAND","RESOURCE_EXHAUSTED")):
                             wait = min(2 ** attempt, 20)
                             print(f"[Retry {attempt+1}/6] {model_name} busy, retry in {wait}s")
                             time.sleep(wait)
