@@ -8,13 +8,27 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from google import genai
 import uvicorn
 
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+API_KEY = os.environ.get("GEMINI_API_KEY")
+if not API_KEY:
+    print("[WARN] 環境変数 GEMINI_API_KEY が設定されていません")
+client = genai.Client(api_key=API_KEY)
 
 app = FastAPI()
 security = HTTPBasic()
 
 USERNAME = os.environ.get("AUTH_USER", "admin")
 PASSWORD = os.environ.get("AUTH_PASS", "password123")
+
+# 優先して使うモデル（上から順に試す）。環境変数 GEMINI_MODELS でカンマ区切り上書き可
+DEFAULT_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+]
+
+# 音声監査に使えない特殊用途モデルを除外するためのキーワード
+EXCLUDE_KEYWORDS = ("tts", "image", "live", "native-audio", "embedding", "omni", "computer-use")
+
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     correct_username = secrets.compare_digest(credentials.username, USERNAME)
@@ -27,6 +41,36 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
         )
     return credentials.username
 
+
+def get_target_models():
+    """使うモデルの候補リストを作る。
+    指定リスト（または環境変数）を優先し、APIから取得できた汎用flashモデルを後ろに補う。"""
+    env_models = os.environ.get("GEMINI_MODELS")
+    preferred = [m.strip() for m in env_models.split(",")] if env_models else list(DEFAULT_MODELS)
+
+    available = []
+    try:
+        for m in client.models.list():
+            name = (getattr(m, "name", "") or "").replace("models/", "")
+            # 新SDK(google-genai)では supported_actions。旧SDKの属性名にも一応対応
+            actions = (getattr(m, "supported_actions", None)
+                       or getattr(m, "supported_generation_methods", None) or [])
+            if ("flash" in name.lower()
+                    and "generateContent" in actions
+                    and not any(k in name.lower() for k in EXCLUDE_KEYWORDS)):
+                available.append(name)
+    except Exception as e:
+        # キーが無効な場合はここで分かるので、ログに原因を出しておく
+        print(f"[WARN] モデル一覧の取得に失敗: {e}")
+
+    if available:
+        # 指定モデルのうち実在するものを先頭に、残りの取得モデルを後ろに
+        models = [m for m in preferred if m in available]
+        models += sorted([m for m in available if m not in models], reverse=True)
+        return models
+    return preferred
+
+
 @app.get("/", response_class=HTMLResponse)
 async def read_index(username: str = Depends(verify_credentials)):
     if os.path.exists("index.html"):
@@ -34,25 +78,26 @@ async def read_index(username: str = Depends(verify_credentials)):
             return f.read()
     return "<h1>index.html が見つかりません</h1>"
 
+
 @app.post("/analyze")
-async def analyze_audio(
-    file: UploadFile = File(...), 
+def analyze_audio(
+    file: UploadFile = File(...),
     prompt: str = Form(...),
     username: str = Depends(verify_credentials)
 ):
-    ext = os.path.splitext(file.filename)[1]
-    if not ext:
-        ext = ".mp3"
+    # def（非async）にしたので、待機中に他のリクエストを止めない
+    ext = os.path.splitext(file.filename or "")[1] or ".mp3"
     temp_path = f"temp_{uuid.uuid4().hex}{ext}"
+    audio_file = None
 
     try:
-        contents = await file.read()
         with open(temp_path, "wb") as f:
-            f.write(contents)
-        
+            f.write(file.file.read())
+
         audio_file = client.files.upload(file=temp_path)
-        
-        max_wait = 40
+
+        # 長尺音声は処理に時間がかかるので待機時間を長めに
+        max_wait = 180
         waited = 0
         while audio_file.state.name == "PROCESSING":
             if waited > max_wait:
@@ -60,7 +105,7 @@ async def analyze_audio(
             time.sleep(3)
             waited += 3
             audio_file = client.files.get(name=audio_file.name)
-            
+
         if audio_file.state.name == "FAILED":
             raise HTTPException(status_code=500, detail="音声ファイルの処理に失敗しました。")
 
@@ -75,77 +120,61 @@ async def analyze_audio(
         )
 
         response_text = None
-        last_error = None
+        errors = []
 
-        try:
-            target_models = []
-            # APIから利用可能なモデルを動的取得
-            for m in client.models.list():
-                model_name = getattr(m, "name", "")
-                methods = getattr(m, "supported_generation_methods", [])
-                if "flash" in model_name.lower() and "generateContent" in methods:
-                    target_models.append(model_name)
-
-            # 動的取得できなかった場合の保険は現在の最新モデルのみ
-            if not target_models:
-                target_models = [
-                    "gemini-3.6-flash",
-                    "gemini-2.5-flash",
-                    "gemini-2.5-flash-lite",
-                ]
-
-            # 順番に試行（混雑時はリトライ）
-            for model_name in target_models:
-                success = False
-                for attempt in range(6):
-                    try:
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=[audio_file, prompt],
-                            config={"system_instruction": system_instruction}
-                        )
-                        response_text = response.text
-                        success = True
-                        break
-                    except Exception as e:
-                        last_error = e
-                        error_text = str(e).upper()
-                        if (
-                            "503" in error_text
-                            or "UNAVAILABLE" in error_text
-                            or "HIGH DEMAND" in error_text
-                            or "RESOURCE_EXHAUSTED" in error_text
-                        ):
-                            wait = min(2 ** attempt, 20)
-                            print(f"[Retry {attempt+1}/6] {model_name} busy, retry in {wait}s")
-                            time.sleep(wait)
-                            continue
-                        break
-                if success:
+        for model_name in get_target_models():
+            success = False
+            for attempt in range(6):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[audio_file, prompt],
+                        config={"system_instruction": system_instruction},
+                    )
+                    response_text = response.text
+                    success = True
+                    print(f"[OK] 使用モデル: {model_name}")
                     break
-        except Exception as e:
-            last_error = e
-
-        try:
-            client.files.delete(name=audio_file.name)
-        except Exception:
-            pass
-            
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+                except Exception as e:
+                    error_text = str(e).upper()
+                    # キーが無効なら他のモデルを試しても無駄なので即終了
+                    if "API_KEY_INVALID" in error_text or "API KEY NOT VALID" in error_text or "PERMISSION_DENIED" in error_text:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"APIキーが無効または権限がありません。Renderの環境変数 GEMINI_API_KEY を確認してください。詳細: {e}",
+                        )
+                    if any(k in error_text for k in ("503", "UNAVAILABLE", "HIGH DEMAND", "RESOURCE_EXHAUSTED", "429")):
+                        wait = min(2 ** attempt, 20)
+                        print(f"[Retry {attempt+1}/6] {model_name} busy, retry in {wait}s")
+                        time.sleep(wait)
+                        continue
+                    # 404（モデル廃止）などは次のモデルへ
+                    errors.append(f"{model_name}: {e}")
+                    print(f"[Skip] {model_name}: {e}")
+                    break
+            if success:
+                break
 
         if response_text is not None:
             return {"result": response_text}
-        else:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"解析に失敗しました。詳細: {last_error}"
-            )
+        raise HTTPException(
+            status_code=500,
+            detail="解析に失敗しました。詳細: " + (" / ".join(errors) or "全モデルが混雑中でした"),
+        )
 
+    except HTTPException:
+        raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if audio_file is not None:
+            try:
+                client.files.delete(name=audio_file.name)
+            except Exception:
+                pass
         if os.path.exists(temp_path):
             os.remove(temp_path)
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
