@@ -122,4 +122,59 @@ def analyze_audio(
         response_text = None
         errors = []
 
-        for model_name in
+        for model_name in get_target_models():
+            success = False
+            for attempt in range(6):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[audio_file, prompt],
+                        config={"system_instruction": system_instruction},
+                    )
+                    response_text = response.text
+                    success = True
+                    print(f"[OK] 使用モデル: {model_name}")
+                    break
+                except Exception as e:
+                    error_text = str(e).upper()
+                    # キーが無効なら他のモデルを試しても無駄なので即終了
+                    if "API_KEY_INVALID" in error_text or "API KEY NOT VALID" in error_text or "PERMISSION_DENIED" in error_text:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"APIキーが無効または権限がありません。Renderの環境変数 GEMINI_API_KEY を確認してください。詳細: {e}",
+                        )
+                    if any(k in error_text for k in ("503", "UNAVAILABLE", "HIGH DEMAND", "RESOURCE_EXHAUSTED", "429")):
+                        wait = min(2 ** attempt, 20)
+                        print(f"[Retry {attempt+1}/6] {model_name} busy, retry in {wait}s")
+                        time.sleep(wait)
+                        continue
+                    # 404（モデル廃止）などは次のモデルへ
+                    errors.append(f"{model_name}: {e}")
+                    print(f"[Skip] {model_name}: {e}")
+                    break
+            if success:
+                break
+
+        if response_text is not None:
+            return {"result": response_text}
+        raise HTTPException(
+            status_code=500,
+            detail="解析に失敗しました。詳細: " + (" / ".join(errors) or "全モデルが混雑中でした"),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if audio_file is not None:
+            try:
+                client.files.delete(name=audio_file.name)
+            except Exception:
+                pass
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
